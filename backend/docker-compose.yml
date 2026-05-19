@@ -11,10 +11,19 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
       SERVER_PORT: 8080
+      DB_HOST: ${DB_HOST:-mysql-global}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_DATABASE: ${DB_DATABASE:-presupuestos}
+      DB_USERNAME: ${DB_USERNAME:-presupuestoUser}
+      DB_PASSWORD: ${DB_PASSWORD:-Presupuesto00$}
+      SQL_MAX_ROWS: ${SQL_MAX_ROWS:-100}
     volumes:
       - .:/app
       - maven-cache:/root/.m2
       - spring-target:/app/target
+    networks:
+      - default
+      - mysql-global
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
@@ -26,3 +35,7 @@ services:
 volumes:
   maven-cache:
   spring-target:
+
+networks:
+  mysql-global:
+    external: true

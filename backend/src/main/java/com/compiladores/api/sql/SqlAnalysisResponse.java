@@ -3,6 +3,8 @@ package com.compiladores.api.sql;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 
 @Schema(description = "Resultado del analisis basico de una consulta SQL.")
 public record SqlAnalysisResponse(
@@ -35,6 +37,34 @@ public record SqlAnalysisResponse(
                 description = "Momento en el que se realizo el analisis.",
                 example = "2026-04-18T16:45:12.120Z"
         )
-        Instant analyzedAt
+        Instant analyzedAt,
+        boolean valid,
+        String statementType,
+        List<SqlToken> tokens,
+        AstNode ast,
+        List<SqlDiagnostic> diagnostics,
+        SemanticReport semantic,
+        ExecutionReport execution
 ) {
+    public record SqlToken(String type, String lexeme, int line, int column) {
+    }
+
+    public record AstNode(String type, String label, String value, List<AstNode> children) {
+    }
+
+    public record SqlDiagnostic(String phase, String severity, String message, int line, int column) {
+    }
+
+    public record SemanticReport(boolean connected, List<String> tables, List<String> columns, List<String> warnings) {
+    }
+
+    public record ExecutionReport(
+            boolean executed,
+            String message,
+            long elapsedMs,
+            int rowCount,
+            List<String> columns,
+            List<Map<String, Object>> rows
+    ) {
+    }
 }
