@@ -4,7 +4,8 @@ import java.util.Locale;
 
 public enum SqlDialect {
     MYSQL,
-    SQLSERVER;
+    SQLSERVER,
+    POSTGRESQL;
 
     public static SqlDialect parse(String value) {
         if (value == null) return MYSQL;
