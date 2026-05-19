@@ -1,16 +1,8 @@
 package com.compiladores.api.sql;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 
-import javax.sql.DataSource;
-import java.sql.DatabaseMetaData;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -20,7 +12,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -35,29 +26,22 @@ public class SqlAnalysisService {
     );
 
     private final Clock clock;
-    @Nullable
-    private final JdbcTemplate jdbcTemplate;
     private final int maxRows;
 
-    @Autowired
-    public SqlAnalysisService(Clock clock, @Nullable JdbcTemplate jdbcTemplate,
+    public SqlAnalysisService(Clock clock,
                               @Value("${application.sql.max-rows:100}") int maxRows) {
         this.clock = clock;
-        this.jdbcTemplate = jdbcTemplate;
         this.maxRows = maxRows;
-    }
-
-    SqlAnalysisService(Clock clock) {
-        this(clock, null, 100);
     }
 
     public SqlAnalysisResponse analyze(SqlAnalysisRequest request) {
         String originalSql = request.sql();
+        SqlDialect dialect = SqlDialect.parse(request.dialect());
         String normalizedSql = normalizeSql(originalSql);
         String trimmedSql = originalSql.trim();
         List<SqlAnalysisResponse.SqlDiagnostic> diagnostics = new ArrayList<>();
 
-        Lexer lexer = new Lexer(trimmedSql);
+        Lexer lexer = new Lexer(trimmedSql, dialect);
         List<Token> tokens = lexer.tokenize();
         for (Token token : tokens) {
             if (token.type == TokenType.INVALID) {
@@ -66,8 +50,40 @@ public class SqlAnalysisService {
             }
         }
 
-        Parser parser = new Parser(tokens, diagnostics);
+        Parser parser = new Parser(tokens, diagnostics, dialect);
         ParseResult parseResult = parser.parse();
+        // Dialect-specific validations:
+        // - LIMIT: if present and dialect is SQLSERVER -> error
+        // - TOP: consider TOP a clause only if it appears after SELECT (allowing DISTINCT/ALL between)
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            String upper = token.lexeme.toUpperCase(Locale.ROOT);
+            if (dialect == SqlDialect.SQLSERVER && "LIMIT".equals(upper)) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "La clausula LIMIT no es compatible con SQL Server. Use TOP o OFFSET/FETCH.", token.line, token.column));
+            }
+
+            if ("SELECT".equals(upper)) {
+                // scan ahead for TOP, allowing DISTINCT/ALL
+                for (int j = i + 1; j < tokens.size(); j++) {
+                    Token t = tokens.get(j);
+                    String up = t.lexeme.toUpperCase(Locale.ROOT);
+                    if (t.type == TokenType.SEMICOLON || t.type == TokenType.EOF) break;
+                    if ("DISTINCT".equals(up) || "ALL".equals(up)) {
+                        continue;
+                    }
+                    if ("TOP".equals(up)) {
+                        if (dialect == SqlDialect.MYSQL) {
+                            diagnostics.add(diagnostic("PARSER", "ERROR",
+                                    "La clausula TOP no es compatible con MySQL. Use LIMIT.", t.line, t.column));
+                        }
+                        break;
+                    }
+                    // if we hit other clause/content, stop scanning
+                    break;
+                }
+            }
+        }
         String statementType = parseResult.statementType();
         SqlAnalysisResponse.SemanticReport semantic = analyzeSemantics(parseResult, diagnostics);
         SqlAnalysisResponse.ExecutionReport execution = executeIfPossible(trimmedSql, statementType, diagnostics);
@@ -96,87 +112,25 @@ public class SqlAnalysisService {
     private SqlAnalysisResponse.SemanticReport analyzeSemantics(ParseResult parseResult,
                                                                 List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
         List<String> warnings = new ArrayList<>();
-        if (jdbcTemplate == null) {
-            warnings.add("No hay JdbcTemplate configurado; se omitio validacion semantica contra MySQL.");
-            return new SqlAnalysisResponse.SemanticReport(false, List.copyOf(parseResult.tables()), List.copyOf(parseResult.columns()), warnings);
-        }
-
-        try {
-            DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource());
-            try (Connection connection = dataSource.getConnection()) {
-                DatabaseMetaData metaData = connection.getMetaData();
-                for (String table : parseResult.tables()) {
-                    if (!tableExists(metaData, table)) {
-                        diagnostics.add(diagnostic("SEMANTIC", "ERROR",
-                                "La tabla '" + table + "' no existe en la base configurada.", 1, 1));
-                    }
-                }
-            }
-            for (String column : parseResult.columns()) {
-                if (!"*".equals(column) && column.contains(".")) {
-                    warnings.add("Columna calificada detectada: " + column);
-                }
-            }
-            return new SqlAnalysisResponse.SemanticReport(true, List.copyOf(parseResult.tables()), List.copyOf(parseResult.columns()), warnings);
-        } catch (Exception ex) {
-            warnings.add("No se pudo validar semantica en MySQL: " + ex.getMessage());
-            return new SqlAnalysisResponse.SemanticReport(false, List.copyOf(parseResult.tables()), List.copyOf(parseResult.columns()), warnings);
-        }
-    }
-
-    private boolean tableExists(DatabaseMetaData metaData, String table) throws SQLException {
-        String schema = null;
-        String tableName = table;
-        if (table.contains(".")) {
-            String[] parts = table.split("\\.", 2);
-            schema = parts[0];
-            tableName = parts[1];
-        }
-        try (ResultSet resultSet = metaData.getTables(null, schema, tableName, new String[]{"TABLE", "VIEW"})) {
-            if (resultSet.next()) {
-                return true;
+        for (String column : parseResult.columns()) {
+            if (!"*".equals(column) && column.contains(".")) {
+                warnings.add("Columna calificada detectada: " + column);
             }
         }
-        try (ResultSet resultSet = metaData.getTables(null, schema, tableName.toUpperCase(Locale.ROOT), new String[]{"TABLE", "VIEW"})) {
-            return resultSet.next();
-        }
+        return new SqlAnalysisResponse.SemanticReport(true, List.copyOf(parseResult.tables()), List.copyOf(parseResult.columns()), warnings);
     }
 
     private SqlAnalysisResponse.ExecutionReport executeIfPossible(String sql, String statementType,
                                                                   List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
         boolean hasErrors = diagnostics.stream().anyMatch(d -> "ERROR".equals(d.severity()));
-        if (hasErrors || jdbcTemplate == null || !READ_ONLY_STARTERS.contains(statementType)) {
-            return new SqlAnalysisResponse.ExecutionReport(false, "La consulta no se ejecuto porque no es valida, no es de lectura o no hay base conectada.",
+        if (hasErrors || !READ_ONLY_STARTERS.contains(statementType)) {
+            return new SqlAnalysisResponse.ExecutionReport(false,
+                    "La consulta no se ejecuto: modo solo analisis sintactico/semantico sin conexion a base de datos.",
                     0, 0, List.of(), List.of());
         }
-
-        long start = System.nanoTime();
-        try {
-            String runnableSql = sql.endsWith(";") ? sql.substring(0, sql.length() - 1) : sql;
-            List<Map<String, Object>> rows = jdbcTemplate.query(connection -> {
-                var statement = connection.prepareStatement(runnableSql);
-                statement.setMaxRows(maxRows);
-                return statement;
-            }, resultSet -> {
-                int columnCount = resultSet.getMetaData().getColumnCount();
-                List<Map<String, Object>> result = new ArrayList<>();
-                while (resultSet.next()) {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        row.put(resultSet.getMetaData().getColumnLabel(i), resultSet.getObject(i));
-                    }
-                    result.add(row);
-                }
-                return result;
-            });
-            long elapsed = (System.nanoTime() - start) / 1_000_000;
-            List<String> columns = rows.isEmpty() ? List.of() : new ArrayList<>(rows.getFirst().keySet());
-            return new SqlAnalysisResponse.ExecutionReport(true, "Query ejecutado correctamente.", elapsed, rows.size(), columns, rows);
-        } catch (Exception ex) {
-            diagnostics.add(diagnostic("EXECUTION", "ERROR", "Error al ejecutar en MySQL: " + ex.getMessage(), 1, 1));
-            long elapsed = (System.nanoTime() - start) / 1_000_000;
-            return new SqlAnalysisResponse.ExecutionReport(false, ex.getMessage(), elapsed, 0, List.of(), List.of());
-        }
+        return new SqlAnalysisResponse.ExecutionReport(false,
+                "Sin ejecucion: este servicio opera en modo analisis sin conexion a base de datos.",
+                0, 0, List.of(), List.of());
     }
 
     private SqlAnalysisResponse.SqlDiagnostic diagnostic(String phase, String severity, String message, int line, int column) {
@@ -205,6 +159,7 @@ public class SqlAnalysisService {
     }
 
     private static final class Lexer {
+        private final SqlDialect dialect;
         private static final Set<String> KEYWORDS = Set.of(
                 "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON",
                 "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "AS", "WITH", "UNION", "ALL",
@@ -218,8 +173,9 @@ public class SqlAnalysisService {
         private int line = 1;
         private int column = 1;
 
-        private Lexer(String source) {
+        private Lexer(String source, SqlDialect dialect) {
             this.source = source;
+            this.dialect = dialect;
         }
 
         private List<Token> tokenize() {
@@ -230,11 +186,15 @@ public class SqlAnalysisService {
                     advance();
                 } else if (current == '-' && peekNext() == '-') {
                     skipLineComment();
+                } else if (dialect == SqlDialect.MYSQL && current == '#') {
+                    skipLineComment();
+                } else if (current == '[') {
+                    tokens.add(readBracketIdentifier());
                 } else if (Character.isLetter(current) || current == '_') {
                     tokens.add(readIdentifier());
                 } else if (Character.isDigit(current)) {
                     tokens.add(readNumber());
-                } else if (current == '\'' || current == '"') {
+                } else if (current == '\'' || current == '"' || current == '`') {
                     tokens.add(readString(current));
                 } else {
                     tokens.add(readSymbol());
@@ -271,6 +231,20 @@ public class SqlAnalysisService {
             int startColumn = column;
             StringBuilder value = new StringBuilder();
             value.append(advance());
+            if (quote == '`') {
+                // backtick quoted identifiers (MySQL)
+                while (!isAtEnd() && peek() != '`') {
+                    value.append(advance());
+                }
+                if (isAtEnd()) {
+                    return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
+                }
+                value.append(advance());
+                String lexeme = value.toString();
+                // strip backticks
+                String content = lexeme.substring(1, lexeme.length() - 1);
+                return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
+            }
             while (!isAtEnd() && peek() != quote) {
                 if (peek() == '\\') {
                     value.append(advance());
@@ -282,6 +256,23 @@ public class SqlAnalysisService {
             }
             value.append(advance());
             return new Token(TokenType.STRING, value.toString(), startLine, startColumn);
+        }
+
+        private Token readBracketIdentifier() {
+            int startLine = line;
+            int startColumn = column;
+            StringBuilder value = new StringBuilder();
+            // consume '['
+            advance();
+            while (!isAtEnd() && peek() != ']') {
+                value.append(advance());
+            }
+            if (isAtEnd()) {
+                return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
+            }
+            // consume ']'
+            advance();
+            return new Token(TokenType.IDENTIFIER, value.toString(), startLine, startColumn);
         }
 
         private Token readSymbol() {
@@ -339,13 +330,15 @@ public class SqlAnalysisService {
     private final class Parser {
         private final List<Token> tokens;
         private final List<SqlAnalysisResponse.SqlDiagnostic> diagnostics;
+        private final SqlDialect dialect;
         private int index;
         private final Set<String> tables = new LinkedHashSet<>();
         private final Set<String> columns = new LinkedHashSet<>();
 
-        private Parser(List<Token> tokens, List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
+        private Parser(List<Token> tokens, List<SqlAnalysisResponse.SqlDiagnostic> diagnostics, SqlDialect dialect) {
             this.tokens = tokens;
             this.diagnostics = diagnostics;
+            this.dialect = dialect;
         }
 
         private ParseResult parse() {

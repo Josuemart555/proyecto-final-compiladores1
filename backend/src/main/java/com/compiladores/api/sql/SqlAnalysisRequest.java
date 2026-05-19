@@ -13,5 +13,11 @@ public record SqlAnalysisRequest(
         @NotBlank(message = "El campo sql es obligatorio.")
         @Size(max = 5000, message = "El campo sql no puede superar 5000 caracteres.")
         String sql
+        ,
+        @Schema(
+                description = "Dialect o variante de SQL del input. Ej: mysql, sqlserver",
+                example = "mysql"
+        )
+        String dialect
 ) {
 }
