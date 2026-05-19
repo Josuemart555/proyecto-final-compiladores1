@@ -9,7 +9,7 @@ COPY docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
 RUN chmod +x mvnw /usr/local/bin/dev-entrypoint.sh \
     && ./mvnw dependency:go-offline -B
 EXPOSE 8080
-CMD ["dev-entrypoint.sh"]
+CMD ["/usr/local/bin/dev-entrypoint.sh"]
 
 FROM maven:3.9.11-eclipse-temurin-21 AS build
 WORKDIR /app

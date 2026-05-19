@@ -44,6 +44,7 @@ function App() {
   const [analysis, setAnalysis] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState('');
+  const [dialect, setDialect] = useState('mysql');
 
   const diagnostics = analysis?.diagnostics ?? [];
   const hasErrors = diagnostics.some((item) => item.severity === 'ERROR');
@@ -55,7 +56,7 @@ function App() {
       const response = await fetch(`${API_BASE_URL}/api/v1/sql/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sql })
+        body: JSON.stringify({ sql, dialect })
       });
       const payload = await response.json();
       if (!response.ok) {
@@ -120,6 +121,10 @@ function App() {
                 {hasErrors ? 'Errors' : 'Valid'}
               </span>
             )}
+            <select value={dialect} onChange={(e) => setDialect(e.target.value)} className="dialect-select">
+              <option value="mysql">MySQL</option>
+              <option value="sqlserver">SQL Server</option>
+            </select>
             <button className="icon-button"><Trash2 size={20} /></button>
             <button className="icon-button"><Settings size={22} /></button>
             <button className="save-button">Save</button>
