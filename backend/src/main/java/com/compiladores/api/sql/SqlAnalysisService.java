@@ -1,18 +1,22 @@
 package com.compiladores.api.sql;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
@@ -20,6 +24,9 @@ public class SqlAnalysisService {
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final Set<String> READ_ONLY_STARTERS = Set.of("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN");
+    private static final Set<String> MONGODB_READ_ONLY = Set.of("FIND", "AGGREGATE", "COUNT");
+    private static final Pattern MONGO_FIELD_PATTERN = Pattern.compile("([\\\"']?)([A-Za-z_][A-Za-z0-9_]*?)\\1\\s*:");
+    private static final Pattern MONGO_FILTER_PATTERN = Pattern.compile("([\\\"']?)([A-Za-z_][A-Za-z0-9_]*?)\\1\\s*:\s*(?:\"([^\"]*)\"|'([^']*)'|([0-9]+(?:\\.[0-9]+)?)|(true|false|null))", Pattern.CASE_INSENSITIVE);
     private static final Set<String> CLAUSE_KEYWORDS = Set.of(
             "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
             "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "WITH", "UNION"
@@ -28,10 +35,15 @@ public class SqlAnalysisService {
     private final Clock clock;
     private final int maxRows;
 
+    @Autowired
     public SqlAnalysisService(Clock clock,
                               @Value("${application.sql.max-rows:100}") int maxRows) {
         this.clock = clock;
         this.maxRows = maxRows;
+    }
+
+    public SqlAnalysisService(Clock clock) {
+        this(clock, 100);
     }
 
     public SqlAnalysisResponse analyze(SqlAnalysisRequest request) {
@@ -40,6 +52,30 @@ public class SqlAnalysisService {
         String normalizedSql = normalizeSql(originalSql);
         String trimmedSql = originalSql.trim();
         List<SqlAnalysisResponse.SqlDiagnostic> diagnostics = new ArrayList<>();
+
+        if (dialect == SqlDialect.MONGODB) {
+            MongoParseResult mongoParseResult = analyzeMongoQuery(trimmedSql, diagnostics);
+            SqlAnalysisResponse.SemanticReport semantic = analyzeSemantics(
+                    new ParseResult(mongoParseResult.statementType(), mongoParseResult.ast(), mongoParseResult.collections(), mongoParseResult.fields()),
+                    diagnostics);
+            SqlAnalysisResponse.ExecutionReport execution = executeIfPossible(trimmedSql, mongoParseResult.statementType(), diagnostics);
+            boolean valid = diagnostics.stream().noneMatch(d -> "ERROR".equals(d.severity()));
+            return new SqlAnalysisResponse(
+                    normalizedSql,
+                    trimmedSql.length(),
+                    trimmedSql.lines().count(),
+                    countStatements(trimmedSql),
+                    trimmedSql.endsWith(";"),
+                    Instant.now(clock),
+                    valid,
+                    mongoParseResult.statementType(),
+                    mongoParseResult.tokens(),
+                    mongoParseResult.ast(),
+                    diagnostics,
+                    semantic,
+                    execution
+            );
+        }
 
         Lexer lexer = new Lexer(trimmedSql, dialect);
         List<Token> tokens = lexer.tokenize();
@@ -123,14 +159,106 @@ public class SqlAnalysisService {
     private SqlAnalysisResponse.ExecutionReport executeIfPossible(String sql, String statementType,
                                                                   List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
         boolean hasErrors = diagnostics.stream().anyMatch(d -> "ERROR".equals(d.severity()));
-        if (hasErrors || !READ_ONLY_STARTERS.contains(statementType)) {
+        if (hasErrors) {
             return new SqlAnalysisResponse.ExecutionReport(false,
-                    "La consulta no se ejecuto: modo solo analisis sintactico/semantico sin conexion a base de datos.",
+                    "No se ejecuto la consulta debido a errores de sintaxis o semantica.",
                     0, 0, List.of(), List.of());
         }
+
+        if (MONGODB_READ_ONLY.contains(statementType)) {
+            return new SqlAnalysisResponse.ExecutionReport(false,
+                    "Consulta MongoDB válida. Solo se valida sintaxis y estructura; no hay conexión a base de datos.",
+                    0, 0, List.of(), List.of());
+        }
+
         return new SqlAnalysisResponse.ExecutionReport(false,
                 "Sin ejecucion: este servicio opera en modo analisis sin conexion a base de datos.",
                 0, 0, List.of(), List.of());
+    }
+
+    private SqlAnalysisResponse.ExecutionReport executeMongoQuery(String sql, String operation,
+                                                                  List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
+        String content = sql.trim();
+        if (content.endsWith(";")) {
+            content = content.substring(0, content.length() - 1).trim();
+        }
+
+        int openParen = content.indexOf('(');
+        int closeParen = content.lastIndexOf(')');
+        if (openParen < 0 || closeParen < openParen) {
+            return new SqlAnalysisResponse.ExecutionReport(false,
+                    "Operacion MongoDB valida, pero no se pudo ejecutar por sintaxis de paréntesis.",
+                    0, 0, List.of(), List.of());
+        }
+
+        String arguments = content.substring(openParen + 1, closeParen).trim();
+        Map<String, Object> filter = parseMongoFilter(arguments);
+
+        if ("FIND".equals(operation)) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            if (!filter.isEmpty()) {
+                rows.add(new LinkedHashMap<>(filter));
+            }
+            List<String> columns = new ArrayList<>(filter.keySet());
+            String message = rows.isEmpty()
+                    ? "Consulta MongoDB válida. No se encontraron resultados simulados."
+                    : "Consulta MongoDB válida. Resultados simulados generados.";
+            return new SqlAnalysisResponse.ExecutionReport(true, message,
+                    0, rows.size(), columns, rows);
+        }
+
+        if ("COUNT".equals(operation)) {
+            int count = filter.isEmpty() ? 0 : 1;
+            Map<String, Object> row = Map.of("count", count);
+            return new SqlAnalysisResponse.ExecutionReport(true,
+                    "Consulta MongoDB COUNT válida. Resultado simulado.",
+                    0, 1, List.of("count"), List.of(row));
+        }
+
+        if ("AGGREGATE".equals(operation)) {
+            return new SqlAnalysisResponse.ExecutionReport(true,
+                    "Consulta MongoDB AGGREGATE válida. Ejecución simulada sin resultados concretos.",
+                    0, 0, List.of(), List.of());
+        }
+
+        return new SqlAnalysisResponse.ExecutionReport(false,
+                "Operacion MongoDB no soportada para ejecucion simulada.",
+                0, 0, List.of(), List.of());
+    }
+
+    private Map<String, Object> parseMongoFilter(String arguments) {
+        Map<String, Object> filter = new LinkedHashMap<>();
+        Matcher matcher = MONGO_FILTER_PATTERN.matcher(arguments);
+        while (matcher.find()) {
+            String key = matcher.group(2);
+            String stringValue = matcher.group(3);
+            String singleValue = matcher.group(4);
+            String numericValue = matcher.group(5);
+            String booleanNullValue = matcher.group(6);
+            Object value = null;
+            if (stringValue != null) {
+                value = stringValue;
+            } else if (singleValue != null) {
+                value = singleValue;
+            } else if (numericValue != null) {
+                if (numericValue.contains(".")) {
+                    value = Double.parseDouble(numericValue);
+                } else {
+                    value = Long.parseLong(numericValue);
+                }
+            } else if (booleanNullValue != null) {
+                String normalized = booleanNullValue.toLowerCase(Locale.ROOT);
+                if ("true".equals(normalized)) {
+                    value = true;
+                } else if ("false".equals(normalized)) {
+                    value = false;
+                } else {
+                    value = null;
+                }
+            }
+            filter.put(key, value);
+        }
+        return filter;
     }
 
     private SqlAnalysisResponse.SqlDiagnostic diagnostic(String phase, String severity, String message, int line, int column) {
@@ -141,11 +269,127 @@ public class SqlAnalysisService {
         return WHITESPACE.matcher(sql.trim()).replaceAll(" ");
     }
 
+    private MongoParseResult analyzeMongoQuery(String sql, List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
+        String content = sql.trim();
+        if (content.endsWith(";")) {
+            content = content.substring(0, content.length() - 1).trim();
+        }
+
+        if (!content.startsWith("db.")) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "Las consultas MongoDB deben iniciar con db.<coleccion>.<operacion>(...).", 1, 1));
+            return new MongoParseResult("MONGODB", emptyAst(), Set.of(), Set.of(), List.of());
+        }
+
+        int collectionEnd = content.indexOf('.', 3);
+        if (collectionEnd < 0) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "No se detecto el nombre de coleccion en la consulta MongoDB.", 1, 4));
+            return new MongoParseResult("MONGODB", emptyAst(), Set.of(), Set.of(), List.of());
+        }
+
+        String collection = content.substring(3, collectionEnd).trim();
+        if (collection.isEmpty()) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "El nombre de la coleccion no puede estar vacio.", 1, 4));
+            return new MongoParseResult("MONGODB", emptyAst(), Set.of(), Set.of(), List.of());
+        }
+
+        int opStart = collectionEnd + 1;
+        int openParen = content.indexOf('(', opStart);
+        int closeParen = content.lastIndexOf(')');
+        if (openParen < 0 || closeParen < openParen) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "Falta la clausula de parametros o el paréntesis de cierre en la consulta MongoDB.", 1, opStart + 1));
+            return new MongoParseResult("MONGODB", emptyAst(), Set.of(collection), Set.of(), List.of());
+        }
+
+        String operation = content.substring(opStart, openParen).trim().toUpperCase(Locale.ROOT);
+        String arguments = content.substring(openParen + 1, closeParen).trim();
+        if (arguments.isEmpty() && !"FIND".equals(operation) && !"COUNT".equals(operation)) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "La operación MongoDB requiere argumentos válidos.", 1, openParen + 2));
+        }
+
+        if (!MONGODB_READ_ONLY.contains(operation)) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "Operación MongoDB no soportada: " + operation + ". Solo se admiten FIND, AGGREGATE y COUNT.", 1, opStart + 1));
+        }
+
+        if (!arguments.isEmpty() && !hasBalancedBrackets(arguments)) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "Los argumentos MongoDB no tienen una sintaxis de llaves o corchetes balanceada.", 1, openParen + 2));
+        }
+
+        List<String> fields = extractMongoFields(arguments);
+        List<SqlAnalysisResponse.SqlToken> tokens = List.of(
+                new SqlAnalysisResponse.SqlToken("DB", "db", 1, 1),
+                new SqlAnalysisResponse.SqlToken("DOT", ".", 1, 3),
+                new SqlAnalysisResponse.SqlToken("COLLECTION", collection, 1, 4),
+                new SqlAnalysisResponse.SqlToken("OPERATION", operation, 1, opStart + 1),
+                new SqlAnalysisResponse.SqlToken("LPAREN", "(", 1, openParen + 1),
+                new SqlAnalysisResponse.SqlToken("ARGUMENTS", arguments, 1, openParen + 2),
+                new SqlAnalysisResponse.SqlToken("RPAREN", ")", 1, closeParen + 1)
+        );
+
+        SqlAnalysisResponse.AstNode ast = node("MongoQuery", "db." + collection + "." + operation, null, List.of(
+                node("Collection", collection, null, List.of()),
+                node("Operation", operation, null, List.of()),
+                node("Arguments", arguments.isEmpty() ? "{}" : arguments, null, List.of())
+        ));
+
+        return new MongoParseResult(operation, ast, Set.of(collection), new LinkedHashSet<>(fields), tokens);
+    }
+
+    private boolean hasBalancedBrackets(String content) {
+        Deque<Character> stack = new ArrayDeque<>();
+        boolean inString = false;
+        char quoteChar = '\u0000';
+        for (int i = 0; i < content.length(); i++) {
+            char c = content.charAt(i);
+            if (inString) {
+                if (c == quoteChar) {
+                    inString = false;
+                } else if (c == '\\') {
+                    i++;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                inString = true;
+                quoteChar = c;
+                continue;
+            }
+            if (c == '{' || c == '[') {
+                stack.push(c);
+            } else if (c == '}' || c == ']') {
+                if (stack.isEmpty()) {
+                    return false;
+                }
+                char opening = stack.pop();
+                if ((opening == '{' && c != '}') || (opening == '[' && c != ']')) {
+                    return false;
+                }
+            }
+        }
+        return stack.isEmpty() && !inString;
+    }
+
+    private List<String> extractMongoFields(String arguments) {
+        List<String> fields = new ArrayList<>();
+        Matcher matcher = MONGO_FIELD_PATTERN.matcher(arguments);
+        while (matcher.find()) {
+            fields.add(matcher.group(2));
+        }
+        return fields;
+    }
+
+    private SqlAnalysisResponse.AstNode emptyAst() {
+        return node("MongoQuery", "Invalid", null, List.of());
+    }
+
     private long countStatements(String sql) {
         return Arrays.stream(sql.split(";"))
                 .map(String::trim)
                 .filter(fragment -> !fragment.isEmpty())
                 .count();
+    }
+
+    private SqlAnalysisResponse.AstNode node(String type, String label, String value, List<SqlAnalysisResponse.AstNode> children) {
+        return new SqlAnalysisResponse.AstNode(type, label, value, children);
     }
 
     private enum TokenType {
@@ -156,6 +400,13 @@ public class SqlAnalysisService {
     }
 
     private record ParseResult(String statementType, SqlAnalysisResponse.AstNode ast, Set<String> tables, Set<String> columns) {
+    }
+
+    private record MongoParseResult(String statementType,
+                                    SqlAnalysisResponse.AstNode ast,
+                                    Set<String> collections,
+                                    Set<String> fields,
+                                    List<SqlAnalysisResponse.SqlToken> tokens) {
     }
 
     private static final class Lexer {

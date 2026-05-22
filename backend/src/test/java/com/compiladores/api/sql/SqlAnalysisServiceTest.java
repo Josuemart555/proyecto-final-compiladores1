@@ -27,4 +27,34 @@ class SqlAnalysisServiceTest {
         assertTrue(response.trailingSemicolon());
         assertEquals(Instant.parse("2026-01-01T00:00:00Z"), response.analyzedAt());
     }
+
+    @Test
+    void analyzeMongoDbQueryValidatesSyntaxOnly() {
+        SqlAnalysisResponse response = service.analyze(new SqlAnalysisRequest("db.presupuestos.find({ status: \"A\" });", "mongodb"));
+
+        assertEquals("db.presupuestos.find({ status: \"A\" });", response.normalizedSql());
+        assertEquals("FIND", response.statementType());
+        assertTrue(response.valid());
+        assertEquals(1, response.semantic().tables().size());
+        assertEquals("presupuestos", response.semantic().tables().get(0));
+        assertEquals(false, response.execution().executed());
+        assertEquals("Consulta MongoDB válida. Solo se valida sintaxis y estructura; no hay conexión a base de datos.", response.execution().message());
+        assertEquals(0, response.execution().rowCount());
+        assertTrue(response.execution().columns().isEmpty());
+        assertTrue(response.execution().rows().isEmpty());
+    }
+
+    @Test
+    void analyzeMongoDbQueryWithCorreoFieldValidatesSyntaxOnly() {
+        SqlAnalysisResponse response = service.analyze(new SqlAnalysisRequest("db.usuarios.find({ correo: \"juan@ejemplo.com\" })", "mongodb"));
+
+        assertEquals("db.usuarios.find({ correo: \"juan@ejemplo.com\" })", response.normalizedSql());
+        assertEquals("FIND", response.statementType());
+        assertTrue(response.valid());
+        assertEquals(false, response.execution().executed());
+        assertEquals("Consulta MongoDB válida. Solo se valida sintaxis y estructura; no hay conexión a base de datos.", response.execution().message());
+        assertEquals(0, response.execution().rowCount());
+        assertTrue(response.execution().columns().isEmpty());
+        assertTrue(response.execution().rows().isEmpty());
+    }
 }
