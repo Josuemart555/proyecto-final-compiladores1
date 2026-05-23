@@ -5,7 +5,7 @@ import java.util.Locale;
 public enum SqlDialect {
     MYSQL,
     SQLSERVER,
-    MONGODB;
+    MONGODB,
     POSTGRESQL;
 
     public static SqlDialect parse(String value) {

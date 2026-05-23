@@ -57,6 +57,9 @@ class SqlAnalysisServiceTest {
         assertEquals(0, response.execution().rowCount());
         assertTrue(response.execution().columns().isEmpty());
         assertTrue(response.execution().rows().isEmpty());
+    }
+
+    @Test
     void postgresqlLimitIsValid() {
         SqlAnalysisResponse response = service.analyze(new SqlAnalysisRequest(
                 "SELECT * FROM usuarios WHERE activo = 1 LIMIT 10;", "postgresql"));
@@ -132,6 +135,6 @@ class SqlAnalysisServiceTest {
                 "postgresql"));
         assertTrue(response.valid());
         assertEquals("SELECT", response.statementType());
-        assertTrue(response.semantic().tables().contains("p"));
+        assertTrue(response.semantic().tables().contains("productos"));
     }
 }
