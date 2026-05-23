@@ -3,6 +3,7 @@ package com.compiladores.api.system;
 import com.compiladores.api.shared.ApiErrorResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -15,7 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.Clock;
 import java.time.Instant;
 
-@Tag(name = "System", description = "Operaciones de salud y metadatos de la aplicacion.")
+@Tag(name = "System", description = "Operaciones de disponibilidad, diagnostico rapido y metadatos de la aplicacion.")
 @RestController
 @RequestMapping("/api/v1/system")
 public class SystemController {
@@ -30,12 +31,28 @@ public class SystemController {
 
     @Operation(
             summary = "Consultar estado del servicio",
-            description = "Devuelve una respuesta simple para verificar que la API se encuentra disponible."
+            description = """
+                    Devuelve una respuesta ligera para confirmar que la API esta disponible.
+                    Usalo para pruebas rapidas desde Swagger, frontend, curl o herramientas como Postman.
+                    """
     )
     @ApiResponses({
             @ApiResponse(
                     responseCode = "200",
-                    description = "Servicio disponible"
+                    description = "Servicio disponible",
+                    content = @Content(
+                            mediaType = "application/json",
+                            schema = @Schema(implementation = PingResponse.class),
+                            examples = @ExampleObject(
+                                    name = "pingOk",
+                                    value = """
+                                            {
+                                              "status": "UP",
+                                              "timestamp": "2026-05-23T16:20:00.000Z"
+                                            }
+                                            """
+                            )
+                    )
             ),
             @ApiResponse(
                     responseCode = "500",
@@ -53,12 +70,28 @@ public class SystemController {
 
     @Operation(
             summary = "Consultar informacion de la aplicacion",
-            description = "Devuelve nombre, descripcion, version, perfil activo y timestamp de la API."
+            description = "Devuelve nombre, descripcion, version, perfil activo de Spring y timestamp de la API."
     )
     @ApiResponses({
             @ApiResponse(
                     responseCode = "200",
-                    description = "Metadatos de la aplicacion obtenidos correctamente"
+                    description = "Metadatos de la aplicacion obtenidos correctamente",
+                    content = @Content(
+                            mediaType = "application/json",
+                            schema = @Schema(implementation = ApplicationInfoResponse.class),
+                            examples = @ExampleObject(
+                                    name = "applicationInfo",
+                                    value = """
+                                            {
+                                              "name": "Compilador SQL API",
+                                              "description": "API REST base para el proyecto final de compiladores",
+                                              "version": "0.0.1-SNAPSHOT",
+                                              "profile": "dev",
+                                              "timestamp": "2026-05-23T16:20:00.000Z"
+                                            }
+                                            """
+                            )
+                    )
             ),
             @ApiResponse(
                     responseCode = "500",

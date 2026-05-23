@@ -23,10 +23,11 @@ import java.util.regex.Pattern;
 public class SqlAnalysisService {
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
-    private static final Set<String> READ_ONLY_STARTERS = Set.of("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN");
+    private static final Set<String> SQL_STARTERS = Set.of("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "MERGE");
     private static final Set<String> MONGODB_READ_ONLY = Set.of("FIND", "AGGREGATE", "COUNT");
+    private static final Pattern MONGO_COLLECTION_PATTERN = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
     private static final Pattern MONGO_FIELD_PATTERN = Pattern.compile("([\\\"']?)([A-Za-z_][A-Za-z0-9_]*?)\\1\\s*:");
-    private static final Pattern MONGO_FILTER_PATTERN = Pattern.compile("([\\\"']?)([A-Za-z_][A-Za-z0-9_]*?)\\1\\s*:\s*(?:\"([^\"]*)\"|'([^']*)'|([0-9]+(?:\\.[0-9]+)?)|(true|false|null))", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MONGO_FILTER_PATTERN = Pattern.compile("([\\\"']?)([A-Za-z_][A-Za-z0-9_]*?)\\1\\s*:\\s*(?:\"([^\"]*)\"|'([^']*)'|([0-9]+(?:\\.[0-9]+)?)|(true|false|null))", Pattern.CASE_INSENSITIVE);
     private static final Set<String> CLAUSE_KEYWORDS = Set.of(
             "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
             "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "WITH", "UNION",
@@ -89,61 +90,7 @@ public class SqlAnalysisService {
 
         Parser parser = new Parser(tokens, diagnostics, dialect);
         ParseResult parseResult = parser.parse();
-        // Dialect-specific validations:
-        // - LIMIT: if present and dialect is SQLSERVER -> error
-        // - TOP: consider TOP a clause only if it appears after SELECT (allowing DISTINCT/ALL between)
-        // - RETURNING, ILIKE, :: cast: PostgreSQL-specific features
-        for (int i = 0; i < tokens.size(); i++) {
-            Token token = tokens.get(i);
-            String upper = token.lexeme.toUpperCase(Locale.ROOT);
-            if (dialect == SqlDialect.SQLSERVER && "LIMIT".equals(upper)) {
-                diagnostics.add(diagnostic("PARSER", "ERROR",
-                        "La clausula LIMIT no es compatible con SQL Server. Use TOP o OFFSET/FETCH.", token.line, token.column));
-            }
-
-            if ("SELECT".equals(upper)) {
-                // scan ahead for TOP, allowing DISTINCT/ALL
-                for (int j = i + 1; j < tokens.size(); j++) {
-                    Token t = tokens.get(j);
-                    String up = t.lexeme.toUpperCase(Locale.ROOT);
-                    if (t.type == TokenType.SEMICOLON || t.type == TokenType.EOF) break;
-                    if ("DISTINCT".equals(up) || "ALL".equals(up)) {
-                        continue;
-                    }
-                    if ("TOP".equals(up)) {
-                        if (dialect == SqlDialect.MYSQL || dialect == SqlDialect.POSTGRESQL) {
-                            String dialectName = dialect == SqlDialect.MYSQL ? "MySQL" : "PostgreSQL";
-                            diagnostics.add(diagnostic("PARSER", "ERROR",
-                                    "La clausula TOP no es compatible con " + dialectName + ". Use LIMIT.", t.line, t.column));
-                        }
-                        break;
-                    }
-                    // if we hit other clause/content, stop scanning
-                    break;
-                }
-            }
-
-            // RETURNING es especifico de PostgreSQL
-            if ("RETURNING".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
-                diagnostics.add(diagnostic("PARSER", "WARN",
-                        "La clausula RETURNING es especifica de PostgreSQL y no es compatible con " +
-                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
-            }
-
-            // ILIKE es especifico de PostgreSQL
-            if ("ILIKE".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
-                diagnostics.add(diagnostic("PARSER", "WARN",
-                        "El operador ILIKE es especifico de PostgreSQL. Use LIKE para " +
-                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
-            }
-
-            // :: (cast) es especifico de PostgreSQL
-            if ("::".equals(token.lexeme) && dialect != SqlDialect.POSTGRESQL) {
-                diagnostics.add(diagnostic("PARSER", "WARN",
-                        "El operador :: (cast) es especifico de PostgreSQL. Use CAST(valor AS tipo) en " +
-                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
-            }
-        }
+        validateDialectRules(tokens, dialect, diagnostics);
         String statementType = parseResult.statementType();
         SqlAnalysisResponse.SemanticReport semantic = analyzeSemantics(parseResult, diagnostics);
         SqlAnalysisResponse.ExecutionReport execution = executeIfPossible(trimmedSql, statementType, diagnostics);
@@ -167,6 +114,93 @@ public class SqlAnalysisService {
                 semantic,
                 execution
         );
+    }
+
+    private void validateDialectRules(List<Token> tokens, SqlDialect dialect,
+                                      List<SqlAnalysisResponse.SqlDiagnostic> diagnostics) {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            String upper = token.lexeme.toUpperCase(Locale.ROOT);
+            if (dialect == SqlDialect.SQLSERVER && "LIMIT".equals(upper)) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "La clausula LIMIT no es compatible con SQL Server. Use TOP o OFFSET/FETCH.", token.line, token.column));
+            }
+
+            if ("SELECT".equals(upper)) {
+                // scan ahead for TOP, allowing DISTINCT/ALL
+                for (int j = i + 1; j < tokens.size(); j++) {
+                    Token t = tokens.get(j);
+                    String up = t.lexeme.toUpperCase(Locale.ROOT);
+                    if (t.type == TokenType.SEMICOLON || t.type == TokenType.EOF) break;
+                    if ("DISTINCT".equals(up) || "ALL".equals(up)) {
+                        continue;
+                    }
+                    if ("TOP".equals(up)) {
+                        if (dialect != SqlDialect.SQLSERVER) {
+                            diagnostics.add(diagnostic("PARSER", "ERROR",
+                                    "La clausula TOP no es compatible con " + dialectName(dialect) + ". Use LIMIT.", t.line, t.column));
+                        }
+                        break;
+                    }
+                    break;
+                }
+            }
+
+            if ("RETURNING".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "La clausula RETURNING es especifica de PostgreSQL y no es compatible con " +
+                        dialectName(dialect) + ".", token.line, token.column));
+            }
+
+            if ("ILIKE".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "El operador ILIKE es especifico de PostgreSQL. Use LIKE para " +
+                        dialectName(dialect) + ".", token.line, token.column));
+            }
+
+            if ("::".equals(token.lexeme) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "El operador :: (cast) es especifico de PostgreSQL. Use CAST(valor AS tipo) en " +
+                        dialectName(dialect) + ".", token.line, token.column));
+            }
+
+            if ("MERGE".equals(upper) && dialect != SqlDialect.SQLSERVER) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "La sentencia MERGE solo esta habilitada para SQL Server en este analizador.", token.line, token.column));
+            }
+
+            if ("FETCH".equals(upper) && dialect == SqlDialect.MYSQL) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "La clausula FETCH no es compatible con MySQL. Use LIMIT.", token.line, token.column));
+            }
+
+            if ("OFFSET".equals(upper) && dialect == SqlDialect.SQLSERVER && !hasKeywordBefore(tokens, i, "ORDER")) {
+                diagnostics.add(diagnostic("PARSER", "ERROR",
+                        "OFFSET en SQL Server requiere una clausula ORDER BY.", token.line, token.column));
+            }
+        }
+    }
+
+    private boolean hasKeywordBefore(List<Token> tokens, int index, String keyword) {
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.type == TokenType.SEMICOLON) {
+                return false;
+            }
+            if (token.lexeme.equalsIgnoreCase(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String dialectName(SqlDialect dialect) {
+        return switch (dialect) {
+            case MYSQL -> "MySQL";
+            case SQLSERVER -> "SQL Server";
+            case POSTGRESQL -> "PostgreSQL";
+            case MONGODB -> "MongoDB";
+        };
     }
 
     private SqlAnalysisResponse.SemanticReport analyzeSemantics(ParseResult parseResult,
@@ -315,6 +349,9 @@ public class SqlAnalysisService {
             diagnostics.add(diagnostic("MONGO", "ERROR", "El nombre de la coleccion no puede estar vacio.", 1, 4));
             return new MongoParseResult("MONGODB", emptyAst(), Set.of(), Set.of(), List.of());
         }
+        if (!MONGO_COLLECTION_PATTERN.matcher(collection).matches()) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "El nombre de la coleccion MongoDB solo puede usar letras, numeros y guion bajo, y debe iniciar con letra o guion bajo.", 1, 4));
+        }
 
         int opStart = collectionEnd + 1;
         int openParen = content.indexOf('(', opStart);
@@ -326,6 +363,13 @@ public class SqlAnalysisService {
 
         String operation = content.substring(opStart, openParen).trim().toUpperCase(Locale.ROOT);
         String arguments = content.substring(openParen + 1, closeParen).trim();
+        String trailing = content.substring(closeParen + 1).trim();
+        if (!trailing.isEmpty()) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "No se permite contenido despues del parentesis de cierre en la consulta MongoDB.", 1, closeParen + 2));
+        }
+        if (operation.isEmpty()) {
+            diagnostics.add(diagnostic("MONGO", "ERROR", "No se detecto la operacion MongoDB.", 1, opStart + 1));
+        }
         if (arguments.isEmpty() && !"FIND".equals(operation) && !"COUNT".equals(operation)) {
             diagnostics.add(diagnostic("MONGO", "ERROR", "La operación MongoDB requiere argumentos válidos.", 1, openParen + 2));
         }
@@ -337,6 +381,7 @@ public class SqlAnalysisService {
         if (!arguments.isEmpty() && !hasBalancedBrackets(arguments)) {
             diagnostics.add(diagnostic("MONGO", "ERROR", "Los argumentos MongoDB no tienen una sintaxis de llaves o corchetes balanceada.", 1, openParen + 2));
         }
+        validateMongoArguments(operation, arguments, diagnostics, openParen + 2);
 
         List<String> fields = extractMongoFields(arguments);
         List<SqlAnalysisResponse.SqlToken> tokens = List.of(
@@ -356,6 +401,22 @@ public class SqlAnalysisService {
         ));
 
         return new MongoParseResult(operation, ast, Set.of(collection), new LinkedHashSet<>(fields), tokens);
+    }
+
+    private void validateMongoArguments(String operation, String arguments,
+                                        List<SqlAnalysisResponse.SqlDiagnostic> diagnostics,
+                                        int column) {
+        if (arguments.isEmpty()) {
+            return;
+        }
+        if (Set.of("FIND", "COUNT").contains(operation) && !(arguments.startsWith("{") && arguments.endsWith("}"))) {
+            diagnostics.add(diagnostic("MONGO", "ERROR",
+                    "Las operaciones FIND y COUNT requieren un documento de filtro entre llaves: { ... }.", 1, column));
+        }
+        if ("AGGREGATE".equals(operation) && !(arguments.startsWith("[") && arguments.endsWith("]"))) {
+            diagnostics.add(diagnostic("MONGO", "ERROR",
+                    "La operacion AGGREGATE requiere un arreglo de etapas entre corchetes: [ ... ].", 1, column));
+        }
     }
 
     private boolean hasBalancedBrackets(String content) {
@@ -440,9 +501,11 @@ public class SqlAnalysisService {
                 "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "AS", "WITH", "UNION", "ALL",
                 "DISTINCT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "SHOW", "DESCRIBE",
                 "DESC", "EXPLAIN", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "CASE",
-                "WHEN", "THEN", "ELSE", "END",
+                "WHEN", "THEN", "ELSE", "END", "PARTITION", "RANK", "AVG", "SUM", "COUNT", "ROUND",
+                "CAST", "INTEGER", "CURRENT", "ROW", "PRECEDING",
                 // SQL Server
-                "TOP", "FETCH", "NEXT", "ROWS", "ONLY", "FIRST",
+                "TOP", "FETCH", "NEXT", "ROWS", "ONLY", "FIRST", "MERGE", "INTO", "USING", "MATCHED",
+                "SOURCE", "TARGET", "SET", "VALUES",
                 // PostgreSQL
                 "RETURNING", "ILIKE", "LATERAL", "SIMILAR", "FILTER", "OVER", "NULLS"
         );
@@ -467,13 +530,15 @@ public class SqlAnalysisService {
                     skipLineComment();
                 } else if (dialect == SqlDialect.MYSQL && current == '#') {
                     skipLineComment();
-                } else if (current == '[') {
+                } else if (current == '[' && dialect == SqlDialect.SQLSERVER) {
                     tokens.add(readBracketIdentifier());
                 } else if (Character.isLetter(current) || current == '_') {
                     tokens.add(readIdentifier());
                 } else if (Character.isDigit(current)) {
                     tokens.add(readNumber());
-                } else if (current == '\'' || current == '"' || current == '`') {
+                } else if (current == '`' && dialect == SqlDialect.MYSQL) {
+                    tokens.add(readQuotedIdentifier('`'));
+                } else if (current == '\'' || current == '"') {
                     tokens.add(readString(current));
                 } else if (current == '$' && dialect == SqlDialect.POSTGRESQL) {
                     tokens.add(readPostgresParam());
@@ -512,30 +577,8 @@ public class SqlAnalysisService {
             int startColumn = column;
             StringBuilder value = new StringBuilder();
             value.append(advance());
-            if (quote == '`') {
-                // backtick quoted identifiers (MySQL)
-                while (!isAtEnd() && peek() != '`') {
-                    value.append(advance());
-                }
-                if (isAtEnd()) {
-                    return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
-                }
-                value.append(advance());
-                String lexeme = value.toString();
-                String content = lexeme.substring(1, lexeme.length() - 1);
-                return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
-            }
             if (quote == '"' && dialect == SqlDialect.POSTGRESQL) {
-                // PostgreSQL uses double quotes for identifier quoting
-                while (!isAtEnd() && peek() != '"') {
-                    value.append(advance());
-                }
-                if (isAtEnd()) {
-                    return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
-                }
-                value.append(advance());
-                String content = value.toString().substring(1, value.length() - 1);
-                return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
+                return readQuotedIdentifierFromOpenQuote('"', value, startLine, startColumn);
             }
             while (!isAtEnd() && peek() != quote) {
                 if (peek() == '\\') {
@@ -548,6 +591,26 @@ public class SqlAnalysisService {
             }
             value.append(advance());
             return new Token(TokenType.STRING, value.toString(), startLine, startColumn);
+        }
+
+        private Token readQuotedIdentifier(char quote) {
+            int startLine = line;
+            int startColumn = column;
+            StringBuilder value = new StringBuilder();
+            value.append(advance());
+            return readQuotedIdentifierFromOpenQuote(quote, value, startLine, startColumn);
+        }
+
+        private Token readQuotedIdentifierFromOpenQuote(char quote, StringBuilder value, int startLine, int startColumn) {
+            while (!isAtEnd() && peek() != quote) {
+                value.append(advance());
+            }
+            if (isAtEnd()) {
+                return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
+            }
+            value.append(advance());
+            String content = value.toString().substring(1, value.length() - 1);
+            return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
         }
 
         private Token readBracketIdentifier() {
@@ -592,9 +655,9 @@ public class SqlAnalysisService {
                 case '(' -> new Token(TokenType.LPAREN, "(", startLine, startColumn);
                 case ')' -> new Token(TokenType.RPAREN, ")", startLine, startColumn);
                 case '*' -> new Token(TokenType.ASTERISK, "*", startLine, startColumn);
-                case '=', '>', '<', '+', '-', '/', '%', '!' -> {
+                case '=', '>', '<', '+', '-', '/', '%', '!', '|', '&' -> {
                     String op = Character.toString(current);
-                    if (!isAtEnd() && "=<>".indexOf(peek()) >= 0) {
+                    if (!isAtEnd() && "=<>|&".indexOf(peek()) >= 0) {
                         op += advance();
                     }
                     yield new Token(TokenType.OPERATOR, op, startLine, startColumn);
@@ -663,9 +726,9 @@ public class SqlAnalysisService {
             validateBalancedParentheses();
             validateSingleStatement();
             String statementType = current().lexeme.toUpperCase(Locale.ROOT);
-            if (!READ_ONLY_STARTERS.contains(statementType)) {
+            if (!SQL_STARTERS.contains(statementType)) {
                 diagnostics.add(diagnostic("PARSER", "ERROR",
-                        "Solo se permite ejecutar consultas de lectura: SELECT, WITH, SHOW, DESCRIBE o EXPLAIN.",
+                        "Solo se permite validar sentencias soportadas: SELECT, WITH, SHOW, DESCRIBE, EXPLAIN o MERGE.",
                         current().line, current().column));
             }
             SqlAnalysisResponse.AstNode ast = parseSelectLike(statementType);
@@ -700,6 +763,9 @@ public class SqlAnalysisService {
         private SqlAnalysisResponse.AstNode parseSelectClause() {
             Token select = advance();
             List<String> values = collectUntil(Set.of("FROM"));
+            if (values.isEmpty()) {
+                diagnostics.add(diagnostic("PARSER", "ERROR", "La clausula SELECT requiere al menos una expresion.", select.line, select.column));
+            }
             splitCsv(values).forEach(column -> {
                 if (!column.isBlank()) {
                     columns.add(column);
@@ -732,6 +798,9 @@ public class SqlAnalysisService {
                 } else {
                     advance();
                 }
+            }
+            if (refs.isEmpty()) {
+                diagnostics.add(diagnostic("PARSER", "ERROR", "La clausula " + label + " requiere una referencia de tabla.", clause.line, clause.column));
             }
             return node("Clause", label, label, refs);
         }
@@ -813,9 +882,28 @@ public class SqlAnalysisService {
         }
 
         private void validateSingleStatement() {
-            long semicolonsBeforeEof = tokens.stream().filter(token -> token.type == TokenType.SEMICOLON).count();
-            if (semicolonsBeforeEof > 1) {
+            int semicolonCount = 0;
+            int firstSemicolon = -1;
+            for (int i = 0; i < tokens.size(); i++) {
+                if (tokens.get(i).type == TokenType.SEMICOLON) {
+                    semicolonCount++;
+                    if (firstSemicolon < 0) {
+                        firstSemicolon = i;
+                    }
+                }
+            }
+            if (semicolonCount > 1) {
                 diagnostics.add(diagnostic("PARSER", "ERROR", "Solo se permite una sentencia por ejecucion.", 1, 1));
+                return;
+            }
+            if (firstSemicolon >= 0) {
+                for (int i = firstSemicolon + 1; i < tokens.size(); i++) {
+                    Token token = tokens.get(i);
+                    if (token.type != TokenType.EOF) {
+                        diagnostics.add(diagnostic("PARSER", "ERROR", "No se permite contenido despues del punto y coma final.", token.line, token.column));
+                        return;
+                    }
+                }
             }
         }
 

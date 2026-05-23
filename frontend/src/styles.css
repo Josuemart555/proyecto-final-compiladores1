@@ -28,7 +28,9 @@ main { position: relative; min-width: 0; }
 .status-pill.error, .warn-badge { background: #ffd9d5; color: #b91c1c; padding: 5px 10px; border-radius: 4px; font: 700 12px Roboto Mono, monospace; text-transform: uppercase; }
 .toast { position: absolute; right: 30px; top: 110px; z-index: 3; min-width: 410px; padding: 18px 22px; display: flex; gap: 16px; border-radius: 8px; box-shadow: 0 18px 36px rgba(15, 23, 42, .12); }
 .toast.success { background: #67edaf; color: #075f47; }
+.toast.error { background: #ffd7d2; color: #9f1239; border: 1px solid #fecaca; }
 .toast strong, .toast span { display: block; }
+.toast span { max-width: 540px; line-height: 1.35; }
 .workbook { min-height: calc(100vh - 80px); display: grid; grid-template-rows: 1fr 318px; }
 .editor-shell { background: white; display: grid; grid-template-columns: 60px 1fr; padding: 40px 20px 20px; }
 .line-numbers { color: #697489; font: 14px Roboto Mono, monospace; display: grid; grid-auto-rows: 29px; text-align: right; padding-right: 25px; background: #eef4ff; margin: -40px 0 -20px -20px; padding-top: 40px; }
@@ -41,6 +43,14 @@ table { width: 100%; border-collapse: collapse; }
 th { text-align: left; padding: 14px 30px; color: #667085; text-transform: uppercase; font-size: 13px; background: #deebff; letter-spacing: .06em; }
 td { padding: 17px 30px; font-size: 16px; border-bottom: 1px solid #e3ebf8; }
 .console-error, .empty-state { margin: 26px; padding: 16px; border-radius: 6px; background: white; color: #b91c1c; }
+.empty-state.success { color: #047857; }
+.empty-state.error { background: #fff1f1; color: #9f1239; border: 1px solid #fecaca; }
+.diagnostic-summary { margin: 26px 26px 0; background: #fff7f7; border: 1px solid #fecaca; border-radius: 8px; overflow: hidden; color: #9f1239; }
+.diagnostic-title { min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 0 18px; background: #ffd7d2; }
+.diagnostic-row { display: grid; grid-template-columns: 96px 1fr 108px; gap: 14px; align-items: start; padding: 14px 18px; border-top: 1px solid #fecaca; }
+.diagnostic-row span { font: 700 12px Roboto Mono, monospace; text-transform: uppercase; }
+.diagnostic-row p { margin: 0; color: #071120; line-height: 1.4; }
+.diagnostic-row small { justify-self: end; color: #9f1239; font: 700 12px Roboto Mono, monospace; }
 .page-intro { max-width: 780px; padding: 40px 32px 20px; }
 .page-intro h1 { margin: 0 0 10px; font-size: 38px; letter-spacing: 0; }
 .page-intro p { margin: 0; font-size: 18px; line-height: 1.55; color: #2b2f39; }

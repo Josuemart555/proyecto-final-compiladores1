@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  AlertTriangle,
   BookOpen,
   CheckCircle2,
   Database,
@@ -64,6 +65,7 @@ function App() {
       }
       setAnalysis(payload);
     } catch (requestError) {
+      setAnalysis(null);
       setError(requestError.message);
     } finally {
       setIsRunning(false);
@@ -149,6 +151,24 @@ function App() {
             </div>
           </div>
         )}
+        {analysis && hasErrors && (
+          <div className="toast error">
+            <AlertTriangle size={24} />
+            <div>
+              <strong>Compilation Failed</strong>
+              <span>{diagnostics.find((item) => item.severity === 'ERROR')?.message ?? 'La consulta contiene errores de sintaxis.'}</span>
+            </div>
+          </div>
+        )}
+        {error && (
+          <div className="toast error">
+            <AlertTriangle size={24} />
+            <div>
+              <strong>Backend Connection Error</strong>
+              <span>{error}</span>
+            </div>
+          </div>
+        )}
         {content}
       </main>
     </div>
@@ -177,6 +197,8 @@ function ResultPanel({ analysis, error }) {
   const columns = analysis?.execution?.columns ?? [];
   const isValidNoExecution = analysis?.valid && analysis?.execution && !analysis.execution.executed;
   const message = analysis?.execution?.message ?? 'Sin resultados.';
+  const diagnostics = analysis?.diagnostics ?? [];
+  const errors = diagnostics.filter((item) => item.severity === 'ERROR');
 
   return (
     <div className="result-panel">
@@ -189,8 +211,23 @@ function ResultPanel({ analysis, error }) {
         <X size={18} />
       </div>
       {error && <div className="console-error">{error}</div>}
+      {errors.length > 0 && (
+        <div className="diagnostic-summary">
+          <div className="diagnostic-title">
+            <AlertTriangle size={20} />
+            <strong>{errors.length === 1 ? '1 syntax error found' : `${errors.length} syntax errors found`}</strong>
+          </div>
+          {errors.map((item, index) => (
+            <div className="diagnostic-row" key={`${item.phase}-${item.line}-${item.column}-${index}`}>
+              <span>{item.phase}</span>
+              <p>{item.message}</p>
+              <small>Line {item.line}:{item.column}</small>
+            </div>
+          ))}
+        </div>
+      )}
       {analysis && rows.length === 0 && (
-        <div className={isValidNoExecution ? 'empty-state success' : 'empty-state'}>{message}</div>
+        <div className={isValidNoExecution ? 'empty-state success' : analysis.valid ? 'empty-state' : 'empty-state error'}>{message}</div>
       )}
       {rows.length > 0 && (
         <table>
