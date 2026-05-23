@@ -20,4 +20,7 @@ public record SqlAnalysisRequest(
         )
         String dialect
 ) {
+    public SqlAnalysisRequest(String sql) {
+        this(sql, null);
+    }
 }

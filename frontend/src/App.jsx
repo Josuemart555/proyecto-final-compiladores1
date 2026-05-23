@@ -124,6 +124,7 @@ function App() {
             <select value={dialect} onChange={(e) => setDialect(e.target.value)} className="dialect-select">
               <option value="mysql">MySQL</option>
               <option value="sqlserver">SQL Server</option>
+              <option value="mongodb">MongoDB</option>
               <option value="postgresql">PostgreSQL</option>
             </select>
             <button className="icon-button"><Trash2 size={20} /></button>
@@ -140,7 +141,11 @@ function App() {
             <CheckCircle2 size={24} />
             <div>
               <strong>Compilation Successful</strong>
-              <span>Query executed in {analysis.execution?.elapsedMs ?? 0}ms. {analysis.execution?.rowCount ?? 0} rows returned.</span>
+              <span>
+                {analysis.execution?.executed
+                  ? `Query executed in ${analysis.execution.elapsedMs ?? 0}ms. ${analysis.execution.rowCount ?? 0} rows returned.`
+                  : 'Query syntax validated. No database execution was performed.'}
+              </span>
             </div>
           </div>
         )}
@@ -170,6 +175,9 @@ function LineNumbers({ text }) {
 function ResultPanel({ analysis, error }) {
   const rows = analysis?.execution?.rows ?? [];
   const columns = analysis?.execution?.columns ?? [];
+  const isValidNoExecution = analysis?.valid && analysis?.execution && !analysis.execution.executed;
+  const message = analysis?.execution?.message ?? 'Sin resultados.';
+
   return (
     <div className="result-panel">
       <div className="tabs">
@@ -181,7 +189,9 @@ function ResultPanel({ analysis, error }) {
         <X size={18} />
       </div>
       {error && <div className="console-error">{error}</div>}
-      {analysis && rows.length === 0 && <div className="empty-state">{analysis.execution?.message ?? 'Sin resultados.'}</div>}
+      {analysis && rows.length === 0 && (
+        <div className={isValidNoExecution ? 'empty-state success' : 'empty-state'}>{message}</div>
+      )}
       {rows.length > 0 && (
         <table>
           <thead>
@@ -190,7 +200,9 @@ function ResultPanel({ analysis, error }) {
           <tbody>
             {rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
-                {columns.map((column) => <td key={column}>{String(row[column] ?? '')}</td>)}
+                {columns.map((column) => (
+                  <td key={column}>{String(row[column] ?? '')}</td>
+                ))}
               </tr>
             ))}
           </tbody>
