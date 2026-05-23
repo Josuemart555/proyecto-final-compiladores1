@@ -6,6 +6,7 @@ public enum SqlDialect {
     MYSQL,
     SQLSERVER,
     MONGODB;
+    POSTGRESQL;
 
     public static SqlDialect parse(String value) {
         if (value == null) return MYSQL;

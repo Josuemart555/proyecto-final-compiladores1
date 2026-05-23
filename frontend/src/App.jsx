@@ -125,6 +125,7 @@ function App() {
               <option value="mysql">MySQL</option>
               <option value="sqlserver">SQL Server</option>
               <option value="mongodb">MongoDB</option>
+              <option value="postgresql">PostgreSQL</option>
             </select>
             <button className="icon-button"><Trash2 size={20} /></button>
             <button className="icon-button"><Settings size={22} /></button>
