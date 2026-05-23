@@ -1,0 +1,134 @@
+MYSQL 
+
+SELECT id, nombre, email, fecha_registro 
+FROM clientes 
+WHERE estado = 'activo' 
+  AND fecha_registro >= '2026-01-01'
+ORDER BY fecha_registro DESC;
+
+SELECT c.nombre, SUM(p.total) AS total_gastado, COUNT(p.id) AS cantidad_pedidos
+FROM clientes c
+INNER JOIN pedidos p ON c.id = p.cliente_id
+WHERE p.estado = 'completado'
+GROUP BY c.id, c.nombre
+HAVING total_gastado > 500;
+
+WITH ComprasClasificadas AS (
+    SELECT 
+        cliente_id,
+        monto,
+        fecha,
+        RANK() OVER (PARTITION BY cliente_id ORDER BY monto DESC) as ranking
+    FROM compras
+)
+SELECT cliente_id, monto, fecha, ranking
+FROM ComprasClasificadas
+WHERE ranking <= 3;
+
+
+SQL Server
+
+SELECT TOP 10 ProductoID, Nombre, StockActual
+FROM Inventario
+WHERE StockActual < NivelReorden
+ORDER BY StockActual ASC;
+
+SELECT TOP 10 ProductoID, Nombre, StockActual
+FROM Inventario
+WHERE StockActual < NivelReorden
+ORDER BY StockActual ASC;
+
+WITH JerarquiaEmpleados AS (
+    -- Miembro ancla: El jefe supremo (sin manager)
+    SELECT EmpleadoID, Nombre, ManagerID, 1 AS NivelJerarquia
+    FROM Empleados 
+    WHERE ManagerID IS NULL
+
+    UNION ALL
+
+    -- Miembro recursivo: Empleados que reportan al nivel anterior
+    SELECT e.EmpleadoID, e.Nombre, e.ManagerID, j.NivelJerarquia + 1
+    FROM Empleados e
+    INNER JOIN JerarquiaEmpleados j ON e.ManagerID = j.EmpleadoID
+)
+SELECT EmpleadoID, Nombre, NivelJerarquia 
+FROM JerarquiaEmpleados 
+ORDER BY NivelJerarquia, Nombre;
+
+
+PostgreSQL
+
+SELECT id, nombre, email 
+FROM usuarios 
+WHERE email ILIKE '%gmail.com%';
+
+SELECT 
+    id, 
+    nombre, 
+    configuracion->>'tema_ui' AS tema_preferido
+FROM cuentas
+WHERE configuracion->>'notificaciones_activas' = 'true'
+  AND CAST(configuracion->>'limite_almacenamiento' AS INTEGER) > 100;
+  
+
+SELECT 
+    fecha_venta,
+    total_dia,
+    ROUND(
+        AVG(total_dia) OVER (
+            ORDER BY fecha_venta 
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        ), 2
+    ) AS promedio_movil_7_dias
+FROM ventas_diarias;
+
+
+
+MongoDB
+
+db.usuarios.find(
+  { pais: "GT", estado: "activo" },
+  { _id: 0, nombre: 1, edad: 1 }
+);
+
+db.usuarios.aggregate([
+  { $match: { edad: { $gte: 18 } } },
+  { $group: {
+      _id: "$ciudad",
+      totalUsuarios: { $sum: 1 },
+      edadPromedio: { $avg: "$edad" }
+  }},
+  { $sort: { totalUsuarios: -1 } }
+]);
+
+
+db.pedidos.aggregate([
+  // 1. Filtrar pedidos completados
+  { $match: { estado: "completado" } },
+  
+  // 2. Desestructurar el array de items (crea un documento por cada item del array)
+  { $unwind: "$items" },
+  
+  // 3. Hacer "JOIN" con la colección de productos
+  { $lookup: {
+      from: "productos",
+      localField: "items.producto_id",
+      foreignField: "_id",
+      as: "producto_detalle"
+  }},
+  
+  // 4. El lookup devuelve un array, lo desempaquetamos
+  { $unwind: "$producto_detalle" },
+  
+  // 5. Agrupar por categoría de producto y calcular totales matemáticos
+  { $group: {
+      _id: "$producto_detalle.categoria",
+      cantidadVendida: { $sum: "$items.cantidad" },
+      ingresosTotales: { 
+          $sum: { $multiply: ["$items.cantidad", "$producto_detalle.precio"] } 
+      }
+  }},
+  
+  // 6. Ordenar por las categorías que generaron más ingresos
+  { $sort: { ingresosTotales: -1 } }
+]);
