@@ -124,6 +124,7 @@ function App() {
             <select value={dialect} onChange={(e) => setDialect(e.target.value)} className="dialect-select">
               <option value="mysql">MySQL</option>
               <option value="sqlserver">SQL Server</option>
+              <option value="postgresql">PostgreSQL</option>
             </select>
             <button className="icon-button"><Trash2 size={20} /></button>
             <button className="icon-button"><Settings size={22} /></button>

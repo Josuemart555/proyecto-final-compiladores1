@@ -22,7 +22,8 @@ public class SqlAnalysisService {
     private static final Set<String> READ_ONLY_STARTERS = Set.of("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN");
     private static final Set<String> CLAUSE_KEYWORDS = Set.of(
             "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
-            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "WITH", "UNION"
+            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "WITH", "UNION",
+            "RETURNING", "FETCH", "LATERAL"
     );
 
     private final Clock clock;
@@ -55,6 +56,7 @@ public class SqlAnalysisService {
         // Dialect-specific validations:
         // - LIMIT: if present and dialect is SQLSERVER -> error
         // - TOP: consider TOP a clause only if it appears after SELECT (allowing DISTINCT/ALL between)
+        // - RETURNING, ILIKE, :: cast: PostgreSQL-specific features
         for (int i = 0; i < tokens.size(); i++) {
             Token token = tokens.get(i);
             String upper = token.lexeme.toUpperCase(Locale.ROOT);
@@ -73,15 +75,37 @@ public class SqlAnalysisService {
                         continue;
                     }
                     if ("TOP".equals(up)) {
-                        if (dialect == SqlDialect.MYSQL) {
+                        if (dialect == SqlDialect.MYSQL || dialect == SqlDialect.POSTGRESQL) {
+                            String dialectName = dialect == SqlDialect.MYSQL ? "MySQL" : "PostgreSQL";
                             diagnostics.add(diagnostic("PARSER", "ERROR",
-                                    "La clausula TOP no es compatible con MySQL. Use LIMIT.", t.line, t.column));
+                                    "La clausula TOP no es compatible con " + dialectName + ". Use LIMIT.", t.line, t.column));
                         }
                         break;
                     }
                     // if we hit other clause/content, stop scanning
                     break;
                 }
+            }
+
+            // RETURNING es especifico de PostgreSQL
+            if ("RETURNING".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "WARN",
+                        "La clausula RETURNING es especifica de PostgreSQL y no es compatible con " +
+                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
+            }
+
+            // ILIKE es especifico de PostgreSQL
+            if ("ILIKE".equals(upper) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "WARN",
+                        "El operador ILIKE es especifico de PostgreSQL. Use LIKE para " +
+                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
+            }
+
+            // :: (cast) es especifico de PostgreSQL
+            if ("::".equals(token.lexeme) && dialect != SqlDialect.POSTGRESQL) {
+                diagnostics.add(diagnostic("PARSER", "WARN",
+                        "El operador :: (cast) es especifico de PostgreSQL. Use CAST(valor AS tipo) en " +
+                        (dialect == SqlDialect.MYSQL ? "MySQL" : "SQL Server") + ".", token.line, token.column));
             }
         }
         String statementType = parseResult.statementType();
@@ -165,7 +189,11 @@ public class SqlAnalysisService {
                 "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "AS", "WITH", "UNION", "ALL",
                 "DISTINCT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "SHOW", "DESCRIBE",
                 "DESC", "EXPLAIN", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "CASE",
-                "WHEN", "THEN", "ELSE", "END"
+                "WHEN", "THEN", "ELSE", "END",
+                // SQL Server
+                "TOP", "FETCH", "NEXT", "ROWS", "ONLY", "FIRST",
+                // PostgreSQL
+                "RETURNING", "ILIKE", "LATERAL", "SIMILAR", "FILTER", "OVER", "NULLS"
         );
 
         private final String source;
@@ -196,6 +224,8 @@ public class SqlAnalysisService {
                     tokens.add(readNumber());
                 } else if (current == '\'' || current == '"' || current == '`') {
                     tokens.add(readString(current));
+                } else if (current == '$' && dialect == SqlDialect.POSTGRESQL) {
+                    tokens.add(readPostgresParam());
                 } else {
                     tokens.add(readSymbol());
                 }
@@ -241,8 +271,19 @@ public class SqlAnalysisService {
                 }
                 value.append(advance());
                 String lexeme = value.toString();
-                // strip backticks
                 String content = lexeme.substring(1, lexeme.length() - 1);
+                return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
+            }
+            if (quote == '"' && dialect == SqlDialect.POSTGRESQL) {
+                // PostgreSQL uses double quotes for identifier quoting
+                while (!isAtEnd() && peek() != '"') {
+                    value.append(advance());
+                }
+                if (isAtEnd()) {
+                    return new Token(TokenType.INVALID, value.toString(), startLine, startColumn);
+                }
+                value.append(advance());
+                String content = value.toString().substring(1, value.length() - 1);
                 return new Token(TokenType.IDENTIFIER, content, startLine, startColumn);
             }
             while (!isAtEnd() && peek() != quote) {
@@ -275,6 +316,20 @@ public class SqlAnalysisService {
             return new Token(TokenType.IDENTIFIER, value.toString(), startLine, startColumn);
         }
 
+        private Token readPostgresParam() {
+            int startLine = line;
+            int startColumn = column;
+            advance(); // consume '$'
+            StringBuilder value = new StringBuilder("$");
+            while (!isAtEnd() && Character.isDigit(peek())) {
+                value.append(advance());
+            }
+            if (value.length() == 1) {
+                return new Token(TokenType.INVALID, "$", startLine, startColumn);
+            }
+            return new Token(TokenType.IDENTIFIER, value.toString(), startLine, startColumn);
+        }
+
         private Token readSymbol() {
             int startLine = line;
             int startColumn = column;
@@ -292,6 +347,13 @@ public class SqlAnalysisService {
                         op += advance();
                     }
                     yield new Token(TokenType.OPERATOR, op, startLine, startColumn);
+                }
+                case ':' -> {
+                    if (!isAtEnd() && peek() == ':') {
+                        advance();
+                        yield new Token(TokenType.OPERATOR, "::", startLine, startColumn);
+                    }
+                    yield new Token(TokenType.INVALID, ":", startLine, startColumn);
                 }
                 default -> new Token(TokenType.INVALID, Character.toString(current), startLine, startColumn);
             };
